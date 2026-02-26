@@ -20,12 +20,7 @@
 
 #define LED_PIN 5 
 #define PUMP_PIN 8   
-#define LIGHT_PIN 9  
-
-#define FEED_HUMIDITY "plant-data.humidity"  //adafruit feeds
-#define FEED_LIGHT "plant-data.light-intensity"
-#define FEED_MOISTURE "plant-data.moisture"
-#define FEED_TEMPERATURE "plant-data.temperature"
+#define LIGHT_PIN 9
 
 static const char *TAG = "PLANT_SYSTEM";
 
@@ -41,7 +36,6 @@ void hardware_init(void); //declaring functions
 void can_driver_init(void);
 bool can_driver_read_sensor(SensorData *out_data);
 void wifi_init(void);
-void adafruit_post_data(const char* feed_key, float value);
 void publish_all_sensors(SensorData *data);
 void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state);
 void update_hardware_actuators(bool pump_state, bool light_state);
@@ -62,18 +56,18 @@ void app_main(void) {
         int64_t current_time = esp_timer_get_time();
 
         if (can_driver_read_sensor(&current_sensor_data)) {  //read sensor (non blocking)
-            printf("new message - temp: %.1f C | light: %u lux | hum: %u%% | moist: %u\n", 
+            printf("new message - temp: %.1f C, light: %u lux, hum: %u%%, moist: %u\n", 
                    current_sensor_data.temperature, 
                    current_sensor_data.light_level,
                    current_sensor_data.humidity,
                    current_sensor_data.moisture);
 
-            if (current_time - last_adafruit_post >= 10000000ULL) {  //adafruit limiter
+            if (current_time - last_adafruit_post >= 1000000ULL) {  //adafruit limiter
                 publish_all_sensors(&current_sensor_data);
                 last_adafruit_post = current_time;
             }
         }
-        
+            
         process_sensor_data(&current_sensor_data, &is_pump_active, &is_light_active);  //logic processing
 
         update_hardware_actuators(is_pump_active, is_light_active); //adjust outputs
@@ -221,12 +215,23 @@ void wifi_init(void) {
     esp_wifi_start();
 }
 
-void adafruit_post_data(const char* feed_key, float value) { 
+void publish_all_sensors(SensorData *data) { 
     char url[256];
-    snprintf(url, sizeof(url), "https://io.adafruit.com/api/v2/%s/feeds/%s/data", AIO_USERNAME, feed_key);
-
-    char post_data[64];
-    snprintf(post_data, sizeof(post_data), "{\"value\": %.2f}", value);
+    snprintf(url, sizeof(url), "https://io.adafruit.com/api/v2/%s/groups/%s/data", AIO_USERNAME, GROUP_KEY);
+    char post_data[384];
+    
+    snprintf(post_data, sizeof(post_data), 
+        "{\"feeds\": ["
+            "{\"key\": \"%s\", \"value\": \"%.2f\"}, "
+            "{\"key\": \"%s\", \"value\": \"%u\"}, "
+            "{\"key\": \"%s\", \"value\": \"%u\"}, "
+            "{\"key\": \"%s\", \"value\": \"%u\"}"
+        "]}", 
+        FEED_TEMPERATURE, data->temperature,
+        FEED_LIGHT, data->light_level,
+        FEED_HUMIDITY, data->humidity,
+        FEED_MOISTURE, data->moisture
+    );
 
     esp_http_client_config_t config = {
         .url = url,
@@ -241,69 +246,10 @@ void adafruit_post_data(const char* feed_key, float value) {
 
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
-        printf(" adafruit IO: Successfully updated '%s' with %.2f\n", feed_key, value);
+        printf(" SUCCESSFULLY uploaded all data to adafruit\n");
     } else {
-        printf(" adafruit IO: failed to update '%s'\n", feed_key);
+        printf(" FAILED to upload data to adafruit\n");
     }
     
     esp_http_client_cleanup(client);
 }
-
-void publish_all_sensors(SensorData *data) { 
-    adafruit_post_data(FEED_TEMPERATURE, data->temperature);
-    adafruit_post_data(FEED_LIGHT, (float)data->light_level);
-    adafruit_post_data(FEED_HUMIDITY, (float)data->humidity);
-    adafruit_post_data(FEED_MOISTURE, (float)data->moisture);
-}
-
-
-//static void twai_init(void)
-//{
-//    // General config: normal mode, chosen TX/RX pins
-//    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_GPIO, RX_GPIO, TWAI_MODE_NORMAL);
-//
-//    // MUST match transmitter: 500 kbps
-//    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
-//
-//    // Accept all frames (we filter in software)
-//    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-//
-//    ESP_ERROR_CHECK(twai_driver_install(&g_config, &t_config, &f_config));
-//    ESP_ERROR_CHECK(twai_start());
-//
-//    ESP_LOGI(TAG, "TWAI started @ 500 kbps. Waiting for ID 0x101...");
-//}
-
-//void app_main(void)
-//{
-//    twai_init();
-//
-//    while (1) {
-//        twai_message_t rx = {0};
-//
-//        // Block up to 1 second
-//        esp_err_t r = twai_receive(&rx, pdMS_TO_TICKS(3000));
-//
-//        if (r == ESP_OK) {
-//            // Match your sender: standard frame, ID 0x101, DLC >= 4
-//            if (!rx.extd && rx.identifier == 0x101 && rx.data_length_code >= 4) {
-//                uint16_t temp_raw = ((uint16_t)rx.data[0] << 8) | rx.data[1];
-//                uint16_t light    = ((uint16_t)rx.data[2] << 8) | rx.data[3];
-//
-//                float tempC = temp_raw / 10.0f;
-//
-//                ESP_LOGI(TAG, "RX 0x%03X Temp=%.1fC Light=%u (rawT=%u)",
-//                         rx.identifier, tempC, light, temp_raw);
-//            } else {
-//                ESP_LOGI(TAG, "Other frame: ID=0x%03lX extd=%d dlc=%d",
-//                         (unsigned long)rx.identifier, rx.extd, rx.data_length_code);
-//            }
-//        } else if (r == ESP_ERR_TIMEOUT) {
-//            // Optional: comment out if too chatty
-//            ESP_LOGI(TAG, "No frame (timeout)");
-//        } else {
-//            ESP_LOGW(TAG, "twai_receive error: %s", esp_err_to_name(r));
-//        }
-//    }
-//}
-
