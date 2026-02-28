@@ -16,16 +16,8 @@
 #include "constants.h"
 #include "secrets.h"
 
-
 #define CAN_TX_PIN GPIO_NUM_17
 #define CAN_RX_PIN GPIO_NUM_18
-
-#define LED_PIN 5 
-
-#define PUMP_PIN 7
-#define LIGHT_PIN 9
-#define PUMP_PIN 7
-#define LIGHT_PIN 9
 
 static const char *TAG = "PLANT_SYSTEM";
 
@@ -61,6 +53,7 @@ void app_main(void) {
         int64_t current_time = esp_timer_get_time();
 
         if (can_driver_read_sensor(&current_sensor_data)) {  //read sensor (non blocking)
+            //read water level sensor
             printf("new message - temp: %.1f C, light: %u lux, hum: %u%%, moist: %u\n", 
                    current_sensor_data.temperature, 
                    current_sensor_data.light_level,
@@ -135,9 +128,7 @@ void update_hardware_actuators(bool pump_state, bool light_state) {
     }
 }
 
-void hardware_init(void) { //GPIO initializations
-    gpio_reset_pin(LED_PIN); 
-    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);  
+void hardware_init(void) { //GPIO initializations 
 
     gpio_reset_pin(PUMP_PIN); 
     gpio_set_direction(PUMP_PIN, GPIO_MODE_OUTPUT);
