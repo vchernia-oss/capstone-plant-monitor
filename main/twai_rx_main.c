@@ -26,6 +26,7 @@ typedef struct {
     uint16_t light_level;
     uint16_t humidity;
     uint16_t moisture;
+    bool water_level;
     uint32_t raw_id;      
 } SensorData;
 
@@ -36,6 +37,7 @@ void wifi_init(void);
 void publish_all_sensors(SensorData *data);
 void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state);
 void update_hardware_actuators(bool pump_state, bool light_state);
+bool read_water_level_sensor(void);
 
 void app_main(void) {
     can_driver_init(); 
@@ -53,12 +55,13 @@ void app_main(void) {
         int64_t current_time = esp_timer_get_time();
 
         if (can_driver_read_sensor(&current_sensor_data)) {  //read sensor (non blocking)
-            //read water level sensor
-            printf("new message - temp: %.1f C, light: %u lux, hum: %u%%, moist: %u\n", 
-                   current_sensor_data.temperature, 
-                   current_sensor_data.light_level,
-                   current_sensor_data.humidity,
-                   current_sensor_data.moisture);
+            current_sensor_data.water_level = read_water_level_sensor(); //reads water level
+            printf("new message - temp: %.1f C, light: %u lux, hum: %u%%, moist: %u, water: %s\n", 
+                current_sensor_data.temperature, 
+                current_sensor_data.light_level,
+                current_sensor_data.humidity,
+                current_sensor_data.moisture,
+                current_sensor_data.water_level ? "HIGH" : "LOW");
 
             if (current_time - last_adafruit_post >= 1000000ULL) {  //adafruit limiter
                 publish_all_sensors(&current_sensor_data);
@@ -135,6 +138,9 @@ void hardware_init(void) { //GPIO initializations
 
     gpio_reset_pin(LIGHT_PIN); 
     gpio_set_direction(LIGHT_PIN, GPIO_MODE_OUTPUT);
+
+    gpio_reset_pin(WATER_LEVEL_PIN); 
+    gpio_set_direction(WATER_LEVEL_PIN, GPIO_MODE_INPUT);
 }
 
 void can_driver_init(void) {  
@@ -213,19 +219,21 @@ void wifi_init(void) {
 void publish_all_sensors(SensorData *data) { 
     char url[256];
     snprintf(url, sizeof(url), "https://io.adafruit.com/api/v2/%s/groups/%s/data", AIO_USERNAME, GROUP_KEY);
-    char post_data[384];
+    char post_data[512];
     
     snprintf(post_data, sizeof(post_data), 
         "{\"feeds\": ["
             "{\"key\": \"%s\", \"value\": \"%.2f\"}, "
             "{\"key\": \"%s\", \"value\": \"%u\"}, "
             "{\"key\": \"%s\", \"value\": \"%u\"}, "
-            "{\"key\": \"%s\", \"value\": \"%u\"}"
+            "{\"key\": \"%s\", \"value\": \"%u\"}, "
+            "{\"key\": \"%s\", \"value\": \"%d\"}"
         "]}", 
         FEED_TEMPERATURE, data->temperature,
         FEED_LIGHT, data->light_level,
         FEED_HUMIDITY, data->humidity,
-        FEED_MOISTURE, data->moisture
+        FEED_MOISTURE, data->moisture,
+        FEED_WATER_LEVEL, data->water_level ? 1 : 0
     );
 
     esp_http_client_config_t config = {
@@ -247,4 +255,8 @@ void publish_all_sensors(SensorData *data) {
     }
     
     esp_http_client_cleanup(client);
+}
+
+bool read_water_level_sensor(void) {
+    return gpio_get_level(WATER_LEVEL_PIN) == 1;  //returns 1 if water is detected, 0 if empty
 }
