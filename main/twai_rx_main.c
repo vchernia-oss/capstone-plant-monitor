@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -30,14 +31,22 @@ typedef struct {
     uint32_t raw_id;      
 } SensorData;
 
+typedef struct {
+    int light_intensity;
+    int moisture;
+    int temperature;
+    int on_off_toggle;
+} ThresholdData;
+
 void hardware_init(void); //declaring functions
 void can_driver_init(void);
 bool can_driver_read_sensor(SensorData *out_data);
 void wifi_init(void);
 void publish_all_sensors(SensorData *data);
-void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state);
+void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state, ThresholdData *thresh);
 void update_hardware_actuators(bool pump_state, bool light_state);
 bool read_water_level_sensor(void);
+void pull_adafruit_thresholds(ThresholdData *thresh);
 
 void app_main(void) {
     can_driver_init(); 
@@ -45,6 +54,13 @@ void app_main(void) {
     wifi_init(); 
 
     SensorData current_sensor_data = {0};
+    
+    ThresholdData current_thresholds = { //initialized with safe values (in case wifi drops)
+        .light_intensity = 90,
+        .moisture = 100,
+        .temperature = 25,
+        .on_off_toggle = 1 // 1 = system on, 0 = system off
+    };
     bool is_pump_active = false;
     bool is_light_active = false;
     int64_t last_adafruit_post = 0;
@@ -53,6 +69,8 @@ void app_main(void) {
 
     while (1) {
         int64_t current_time = esp_timer_get_time();
+
+        pull_adafruit_thresholds(&current_thresholds);
 
         if (can_driver_read_sensor(&current_sensor_data)) {  //read sensor (non blocking)
             current_sensor_data.water_level = read_water_level_sensor(); //reads water level
@@ -63,13 +81,13 @@ void app_main(void) {
                 current_sensor_data.moisture,
                 current_sensor_data.water_level ? "HIGH" : "LOW");
 
-            if (current_time - last_adafruit_post >= 1000000ULL) {  //adafruit limiter
+            if (current_time - last_adafruit_post >= ADA_TIME_LIMIT) {  //adafruit limiter
                 publish_all_sensors(&current_sensor_data);
                 last_adafruit_post = current_time;
             }
         }
 
-        process_sensor_data(&current_sensor_data, &is_pump_active, &is_light_active);  //logic processing
+        process_sensor_data(&current_sensor_data, &is_pump_active, &is_light_active, &current_thresholds); //logic processing
 
         update_hardware_actuators(is_pump_active, is_light_active); //adjust outputs
 
@@ -77,23 +95,29 @@ void app_main(void) {
     }
 }
 
-void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state) { 
+void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state, ThresholdData *thresh) { 
     static int64_t pump_start_time = 0;
     static int64_t cooldown_start_time = 0;
     static bool is_cooldown = false;
 
-    if (data->raw_id == 0) return; // Ignore boot cycle null data
+    if (data->raw_id == 0) return; //ignore null data
     
+    if (thresh->on_off_toggle == 0) {
+        *pump_state = false;
+        *light_state = false;
+        return; 
+    }
+
     int64_t current_time = esp_timer_get_time();
 
-    if (data->light_level < 90) { //light
+    if (data->light_level < thresh->light_intensity) { //light
         *light_state = true;  //too dark, turn on
-    } else if (data->light_level > 110) {
+    } else if (data->light_level > (thresh->light_intensity+20)) {
         *light_state = false; //bright enough, turn off
     }
 
     if (*pump_state == false && is_cooldown == false) { //pump
-        if (data->moisture < 100) {
+        if ((data->moisture < thresh->moisture) && (data->water_level == true)) {
             *pump_state = true;
             pump_start_time = current_time;
         }
@@ -108,7 +132,7 @@ void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state) 
     }
 
     if (is_cooldown == true) {
-        if (current_time - cooldown_start_time >= 100000000ULL) { //1 min pump cooldown
+        if (current_time - cooldown_start_time >= PUMP_COOLDOWN) { //1 min pump cooldown
             is_cooldown = false;
         }
     }
@@ -218,7 +242,7 @@ void wifi_init(void) {
 
 void publish_all_sensors(SensorData *data) { 
     char url[256];
-    snprintf(url, sizeof(url), "https://io.adafruit.com/api/v2/%s/groups/%s/data", AIO_USERNAME, GROUP_KEY);
+    snprintf(url, sizeof(url), "https://io.adafruit.com/api/v2/%s/groups/%s/data", AIO_USERNAME, GROUP_KEY_DATA);
     char post_data[512];
     
     snprintf(post_data, sizeof(post_data), 
@@ -259,4 +283,69 @@ void publish_all_sensors(SensorData *data) {
 
 bool read_water_level_sensor(void) {
     return gpio_get_level(WATER_LEVEL_PIN) == 1;  //returns 1 if water is detected, 0 if empty
+}
+
+void pull_adafruit_thresholds(ThresholdData *thresh) {
+    static int64_t last_pull_time = 0;
+    int64_t current_time = esp_timer_get_time();
+
+    if (last_pull_time != 0 && (current_time - last_pull_time < 10000000ULL)) { //if 10 seconds have not passed, exit
+        return; 
+    }
+
+    char url[256]; //pulls data from adafruit
+    snprintf(url, sizeof(url), "https://io.adafruit.com/api/v2/%s/groups/%s", AIO_USERNAME, GROUP_THRESHOLDS);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "X-AIO-Key", AIO_KEY);
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err == ESP_OK) {
+        esp_http_client_fetch_headers(client);
+        
+        char buffer[2048] = {0}; 
+        int read_len = esp_http_client_read(client, buffer, sizeof(buffer) - 1);
+        
+        if (read_len > 0) {
+            char *ptr = strstr(buffer, "\"light-intensity\"");
+            if (ptr && (ptr = strstr(ptr, "\"last_value\":\""))) {
+                thresh->light_intensity = atoi(ptr + 14);
+            }
+            
+            ptr = strstr(buffer, "\"moisture\"");
+            if (ptr && (ptr = strstr(ptr, "\"last_value\":\""))) {
+                thresh->moisture = atoi(ptr + 14);
+            }
+
+            ptr = strstr(buffer, "\"temperature\"");
+            if (ptr && (ptr = strstr(ptr, "\"last_value\":\""))) {
+                thresh->temperature = atoi(ptr + 14);
+            }
+
+            ptr = strstr(buffer, "\"on-off-toggle\"");
+            if (ptr && (ptr = strstr(ptr, "\"last_value\":\""))) {
+                char *val_ptr = ptr + 14; 
+                if (strncmp(val_ptr, "ON", 2) == 0 || strncmp(val_ptr, "1", 1) == 0) {
+                    thresh->on_off_toggle = 1; //on
+                } else {
+                    thresh->on_off_toggle = 0; //off
+                }
+            }
+
+            printf(" downloaded thresholds light: %d moist: %d temp: %d toggle: %d\n", 
+                   thresh->light_intensity, thresh->moisture, thresh->temperature, thresh->on_off_toggle);
+        }
+    } else {
+        printf(" failed to connect to Adafruit for threshold download\n");
+    }
+    
+    esp_http_client_cleanup(client);
+    
+    last_pull_time = esp_timer_get_time(); //timer reset
 }
