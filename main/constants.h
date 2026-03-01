@@ -6,7 +6,7 @@
 #define PUMP_PIN 7
 #define LIGHT_PIN 9
 #define WATER_LEVEL_PIN 10 // pin D7
-#define ADA_TIME_LIMIT 2000000ULL //2 seconds
+#define ADA_TIME_LIMIT 10000000ULL //10 seconds
 
 
 //mcu board definitions
@@ -17,8 +17,7 @@
 
 
 //testing definitions
-#define PUMP_COOLDOWN 60000000ULL //1 minute
-
+#define PUMP_COOLDOWN 15000000ULL //45 second cooldown
 
 //real world definitions
 //#define PUMP_COOLDOWN 300000000ULL //5 minutes
