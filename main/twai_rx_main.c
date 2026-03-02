@@ -14,6 +14,7 @@
 #include "esp_wifi.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "driver/ledc.h"
 #include "constants.h"
 #include "secrets.h"
 
@@ -288,8 +289,8 @@ void publish_all_sensors(SensorData *data) {
 }
 
 bool read_water_level_sensor(void) {
-    //return true;
-    return gpio_get_level(WATER_LEVEL_PIN) == 1;  //returns 1 if water is detected, 0 if empty
+    return true;
+    //return gpio_get_level(WATER_LEVEL_PIN) == 1;  //returns 1 if water is detected, 0 if empty
 }
 
 void pull_adafruit_thresholds(ThresholdData *thresh) {
