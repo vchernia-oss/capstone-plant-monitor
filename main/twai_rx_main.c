@@ -166,10 +166,11 @@ void hardware_init(void) { //GPIO initializations
 
     gpio_reset_pin(LIGHT_PIN); 
     gpio_set_direction(LIGHT_PIN, GPIO_MODE_OUTPUT);
+    //gpio_set_pull_mode(LIGHT_PIN, GPIO_PULLDOWN_ONLY);
 
     gpio_reset_pin(WATER_LEVEL_PIN); 
     gpio_set_direction(WATER_LEVEL_PIN, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(WATER_LEVEL_PIN, GPIO_PULLDOWN_ONLY);
+    gpio_set_pull_mode(WATER_LEVEL_PIN, GPIO_FLOATING);
 }
 
 void can_driver_init(void) {  
@@ -289,8 +290,8 @@ void publish_all_sensors(SensorData *data) {
 }
 
 bool read_water_level_sensor(void) {
-    return true;
-    //return gpio_get_level(WATER_LEVEL_PIN) == 1;  //returns 1 if water is detected, 0 if empty
+    //return true;
+    return gpio_get_level(WATER_LEVEL_PIN) == 1;  //returns 1 if water is detected, 0 if empty
 }
 
 void pull_adafruit_thresholds(ThresholdData *thresh) {
