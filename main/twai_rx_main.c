@@ -167,7 +167,7 @@ void hardware_init(void) { //GPIO initializations
 
     gpio_reset_pin(LIGHT_PIN); 
     gpio_set_direction(LIGHT_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(PUMP_PIN, 0); //force voltage low
+    gpio_set_level(LIGHT_PIN, 0); //force voltage low
     //gpio_set_pull_mode(LIGHT_PIN, GPIO_PULLDOWN_ONLY);
 
     gpio_reset_pin(WATER_LEVEL_PIN); 
