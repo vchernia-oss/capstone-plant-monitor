@@ -103,14 +103,14 @@ void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state, 
     static int64_t pump_start_time = 0;
     static int64_t cooldown_start_time = 0;
     static bool is_cooldown = false;
-
-    if (data->raw_id == 0) return; //ignore null data
     
     if (thresh->on_off_toggle == 0) {
         *pump_state = false;
         *light_state = false;
         return; 
     }
+
+    if (data->raw_id == 0) return; //ignore null data
 
     int64_t current_time = esp_timer_get_time();
 
@@ -152,11 +152,23 @@ void update_hardware_actuators(bool pump_state, bool light_state) {
         last_pump_state = pump_state;
     }
 
+    //if (light_state != last_light_state) {
+    //    gpio_set_level(LIGHT_PIN, light_state ? 1 : 0);
+    //    printf(" ACTION: led grow lights turned %s\n", light_state ? "ON" : "OFF");
+    //    last_light_state = light_state;
+    //}
+
     if (light_state != last_light_state) {
-        gpio_set_level(LIGHT_PIN, light_state ? 1 : 0);
-        printf(" ACTION: led grow lights turned %s\n", light_state ? "ON" : "OFF");
+        uint32_t target_duty = light_state ? 255 : 0; //sets target brightness (0-255)
+        int fade_time = 3000;  //in ms
+
+        ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, target_duty, fade_time);
+        ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT); //no wait mode
+        
+        printf(" ACTION: led grow lights turned %s (PWM duty: %lu/255)\n", light_state ? "ON" : "OFF", target_duty);
         last_light_state = light_state;
     }
+
 }
 
 void hardware_init(void) { //GPIO initializations 
@@ -165,14 +177,37 @@ void hardware_init(void) { //GPIO initializations
     gpio_set_direction(PUMP_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(PUMP_PIN, 0); //force voltage low
 
-    gpio_reset_pin(LIGHT_PIN); 
-    gpio_set_direction(LIGHT_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(LIGHT_PIN, 0); //force voltage low
-    //gpio_set_pull_mode(LIGHT_PIN, GPIO_PULLDOWN_ONLY);
-
     gpio_reset_pin(WATER_LEVEL_PIN); 
     gpio_set_direction(WATER_LEVEL_PIN, GPIO_MODE_INPUT);
     gpio_set_pull_mode(WATER_LEVEL_PIN, GPIO_FLOATING);
+
+    //gpio_reset_pin(LIGHT_PIN); 
+    //gpio_set_direction(LIGHT_PIN, GPIO_MODE_OUTPUT);
+    //gpio_set_level(LIGHT_PIN, 0); //force voltage low
+    
+    
+    ledc_timer_config_t ledc_timer = {  //configurations for LEDC Timer for PWM
+        .speed_mode       = LEDC_LOW_SPEED_MODE,
+        .timer_num        = LEDC_TIMER_0,
+        .duty_resolution  = LEDC_TIMER_8_BIT, //8bit resolution (0 to 255)
+        .freq_hz          = 5000, //5kHz PWM frequency
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ledc_timer_config(&ledc_timer);
+
+    
+    ledc_channel_config_t ledc_channel = {  //configurations for LEDC Channel for LIGHT_PIN
+        .speed_mode     = LEDC_LOW_SPEED_MODE,
+        .channel        = LEDC_CHANNEL_0,
+        .timer_sel      = LEDC_TIMER_0,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = LIGHT_PIN,
+        .duty           = 0, //start with 0% duty cycle (off)
+        .hpoint         = 0
+    };
+    ledc_channel_config(&ledc_channel);
+
+    ledc_fade_func_install(0);
 }
 
 void can_driver_init(void) {  
