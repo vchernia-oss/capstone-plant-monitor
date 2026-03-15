@@ -15,11 +15,14 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "driver/ledc.h"
+#include "freertos/semphr.h"
 #include "constants.h"
 #include "secrets.h"
 
 #define CAN_TX_PIN GPIO_NUM_17
 #define CAN_RX_PIN GPIO_NUM_18
+
+SemaphoreHandle_t threshold_mutex;
 
 static const char *TAG = "PLANT_SYSTEM";
 
@@ -43,12 +46,15 @@ void hardware_init(void); //declaring functions
 void can_driver_init(void);
 bool can_driver_read_sensor(SensorData *out_data);
 void wifi_init(void);
+void rtos_tasks_init(ThresholdData *thresh_data);
 void publish_all_sensors(SensorData *data);
 void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm, ThresholdData *thresh, bool new_data);
 void update_hardware_actuators(bool pump_state, uint32_t light_pwm);
 bool read_water_level_sensor(void);
 void pull_adafruit_thresholds(ThresholdData *thresh);
 int get_target_lux(int level);
+void adafruit_rx_task(void *pvParameters);
+ThresholdData get_safe_thresholds(ThresholdData *shared_thresh);
 
 void app_main(void) {
     can_driver_init(); 
@@ -69,12 +75,16 @@ void app_main(void) {
     
     printf("system initialized, now listening for CANBUS messages\n");
 
+    rtos_tasks_init(&current_thresholds);
+
     while (1) {
         int64_t current_time = esp_timer_get_time();
 
         bool new_data_arrived = false;
 
-        pull_adafruit_thresholds(&current_thresholds);
+        //pull_adafruit_thresholds(&current_thresholds);
+
+        ThresholdData local_thresholds = get_safe_thresholds(&current_thresholds);
 
         if (can_driver_read_sensor(&current_sensor_data)) {  //read sensor (non blocking)
             new_data_arrived = true;
@@ -92,9 +102,9 @@ void app_main(void) {
             }
         }
 
-        process_sensor_data(&current_sensor_data, &is_pump_active, &current_light_pwm, &current_thresholds, new_data_arrived); //logic processing
+        process_sensor_data(&current_sensor_data, &is_pump_active, &current_light_pwm, &local_thresholds, new_data_arrived); //logic processing
 
-        update_hardware_actuators(is_pump_active, current_light_pwm); //adjust outputs
+        update_hardware_actuators(is_pump_active, current_light_pwm); //adjusts outputs
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -340,12 +350,12 @@ bool read_water_level_sensor(void) {
 }
 
 void pull_adafruit_thresholds(ThresholdData *thresh) {
-    static int64_t last_pull_time = 0;
-    int64_t current_time = esp_timer_get_time();
+    //static int64_t last_pull_time = 0;
+    //int64_t current_time = esp_timer_get_time();
 
-    if (last_pull_time != 0 && (current_time - last_pull_time < 20000000ULL)) { //if 20 seconds have not passed, exit
-        return; 
-    }
+    //if (last_pull_time != 0 && (current_time - last_pull_time < 20000000ULL)) { //if 20 seconds have not passed, exit
+    //    return; 
+    //}
 
     char url[256]; //pulls data from adafruit
     snprintf(url, sizeof(url), "https://io.adafruit.com/api/v2/%s/groups/%s", AIO_USERNAME, GROUP_THRESHOLDS);
@@ -412,7 +422,7 @@ void pull_adafruit_thresholds(ThresholdData *thresh) {
     
     esp_http_client_cleanup(client);
     
-    last_pull_time = esp_timer_get_time(); //timer reset
+    //last_pull_time = esp_timer_get_time(); //timer reset
 }
 
 int get_target_lux(int level) {
@@ -420,4 +430,49 @@ int get_target_lux(int level) {
     if (level == 2) return LUX_TARGET_MEDIUM;
     if (level == 3) return LUX_TARGET_HIGH;
     return 0; //turns light off if illegal value
+}
+
+void rtos_tasks_init(ThresholdData *thresh_data) {
+    threshold_mutex = xSemaphoreCreateMutex(); //creates mutex
+    
+    if (threshold_mutex != NULL) { //checks, then launches tasks
+        xTaskCreate(adafruit_rx_task, "adafruit_rx", 8192, thresh_data, 2, NULL);
+        //printf("RTOS tasks and mutexes initialized successfully\n");
+    } else {
+        printf("erorr: failed to create RTOS mutexes\n");
+    }
+}
+
+ThresholdData get_safe_thresholds(ThresholdData *shared_thresh) {
+    ThresholdData safe_copy = {0};
+    
+    if (xSemaphoreTake(threshold_mutex, portMAX_DELAY)) { //lock, grab data, release lock
+        safe_copy = *shared_thresh;
+        xSemaphoreGive(threshold_mutex);
+    }
+    
+    return safe_copy;
+}
+
+void adafruit_rx_task(void *pvParameters) {
+    ThresholdData *shared_thresh = (ThresholdData *)pvParameters;
+    ThresholdData local_thresh;
+
+    vTaskDelay(pdMS_TO_TICKS(5000)); //delay for startup
+
+    while (1) {
+        if (xSemaphoreTake(threshold_mutex, portMAX_DELAY)) { //pull current thresholds
+            local_thresh = *shared_thresh;
+            xSemaphoreGive(threshold_mutex);
+        }
+
+        pull_adafruit_thresholds(&local_thresh); //download from adafruit servers
+
+        if (xSemaphoreTake(threshold_mutex, portMAX_DELAY)) { //update thresholds
+            *shared_thresh = local_thresh;
+            xSemaphoreGive(threshold_mutex);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20000)); //20 second wait
+    }
 }
