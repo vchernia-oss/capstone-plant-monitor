@@ -48,6 +48,7 @@ void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm
 void update_hardware_actuators(bool pump_state, uint32_t light_pwm);
 bool read_water_level_sensor(void);
 void pull_adafruit_thresholds(ThresholdData *thresh);
+int get_target_lux(int level);
 
 void app_main(void) {
     can_driver_init(); 
@@ -57,7 +58,7 @@ void app_main(void) {
     SensorData current_sensor_data = {0};
     
     ThresholdData current_thresholds = { //initialized with safe values (in case wifi drops)
-        .light_intensity = 90,
+        .light_intensity = 1,
         .moisture = 100,
         .temperature = 25,
         .on_off_toggle = 1 // 1 = system on, 0 = system off
@@ -115,7 +116,8 @@ void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm
     int64_t current_time = esp_timer_get_time();
 
     if (new_data == true) {
-        int error = thresh->light_intensity - data->light_level;
+        int target_lux = get_target_lux(thresh->light_intensity);
+        int error = target_lux - data->light_level;
         int pwm_jump = error * PWM_LUX_RATIO;
         
         int new_pwm = (int)*light_pwm + pwm_jump;
@@ -411,4 +413,11 @@ void pull_adafruit_thresholds(ThresholdData *thresh) {
     esp_http_client_cleanup(client);
     
     last_pull_time = esp_timer_get_time(); //timer reset
+}
+
+int get_target_lux(int level) {
+    if (level == 1) return LUX_TARGET_LOW;
+    if (level == 2) return LUX_TARGET_MEDIUM;
+    if (level == 3) return LUX_TARGET_HIGH;
+    return 0; //turns light off if illegal value
 }

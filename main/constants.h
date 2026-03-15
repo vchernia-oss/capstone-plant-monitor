@@ -4,7 +4,9 @@
 //measurement calibration ratios
 #define PWM_LUX_RATIO 0.0256f //PWM lux ratio (to be updated)
 
-
+#define LUX_TARGET_LOW 2000
+#define LUX_TARGET_MEDIUM 5000
+#define LUX_TARGET_HIGH 15000
 
 //dev board definitions
 //#define PUMP_PIN 7
