@@ -44,8 +44,8 @@ void can_driver_init(void);
 bool can_driver_read_sensor(SensorData *out_data);
 void wifi_init(void);
 void publish_all_sensors(SensorData *data);
-void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state, ThresholdData *thresh, bool new_data);
-void update_hardware_actuators(bool pump_state, bool light_state);
+void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm, ThresholdData *thresh, bool new_data);
+void update_hardware_actuators(bool pump_state, uint32_t light_pwm);
 bool read_water_level_sensor(void);
 void pull_adafruit_thresholds(ThresholdData *thresh);
 
@@ -63,7 +63,7 @@ void app_main(void) {
         .on_off_toggle = 1 // 1 = system on, 0 = system off
     };
     bool is_pump_active = false;
-    bool is_light_active = false;
+    uint32_t current_light_pwm = 0;
     int64_t last_adafruit_post = 0;
     
     printf("system initialized, now listening for CANBUS messages\n");
@@ -91,22 +91,22 @@ void app_main(void) {
             }
         }
 
-        process_sensor_data(&current_sensor_data, &is_pump_active, &is_light_active, &current_thresholds, new_data_arrived); //logic processing
+        process_sensor_data(&current_sensor_data, &is_pump_active, &current_light_pwm, &current_thresholds, new_data_arrived); //logic processing
 
-        update_hardware_actuators(is_pump_active, is_light_active); //adjust outputs
+        update_hardware_actuators(is_pump_active, current_light_pwm); //adjust outputs
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
-void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state, ThresholdData *thresh, bool new_data) { 
+void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm, ThresholdData *thresh, bool new_data) { 
     static int64_t pump_start_time = 0;
     static int64_t cooldown_start_time = 0;
     static bool is_cooldown = false;
     
     if (thresh->on_off_toggle == 0) {
         *pump_state = false;
-        *light_state = false;
+        *light_pwm = 0;
         return; 
     }
 
@@ -114,10 +114,16 @@ void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state, 
 
     int64_t current_time = esp_timer_get_time();
 
-    if (data->light_level < thresh->light_intensity) { //light
-        *light_state = true;  //too dark, turn on
-    } else if (data->light_level > (thresh->light_intensity+10)) {
-        *light_state = false; //bright enough, turn off
+    if (new_data == true) {
+        int error = thresh->light_intensity - data->light_level;
+        int pwm_jump = error * PWM_LUX_RATIO;
+        
+        int new_pwm = (int)*light_pwm + pwm_jump;
+
+        if (new_pwm > 255) new_pwm = 255;  //restrict to valid PWM mode (0-255)
+        if (new_pwm < 0) new_pwm = 0;
+
+        *light_pwm = (uint32_t)new_pwm;
     }
 
     if (*pump_state == false && is_cooldown == false && new_data == true) { //pump
@@ -142,9 +148,9 @@ void process_sensor_data(SensorData *data, bool *pump_state, bool *light_state, 
     }
 }
 
-void update_hardware_actuators(bool pump_state, bool light_state) {  
+void update_hardware_actuators(bool pump_state, uint32_t light_pwm) {  
     static bool last_pump_state = false;//trigger only when changing them
-    static bool last_light_state = false;
+    static bool last_light_pwm = 300; //adding illegal value to cover startup edge cases
     
     if (pump_state != last_pump_state) {
         gpio_set_level(PUMP_PIN, pump_state ? 1 : 0);
@@ -158,15 +164,15 @@ void update_hardware_actuators(bool pump_state, bool light_state) {
     //    last_light_state = light_state;
     //}
 
-    if (light_state != last_light_state) {
-        uint32_t target_duty = light_state ? 255 : 0; //sets target brightness (0-255)
+    if (light_pwm != last_light_pwm) {
+        //uint32_t target_duty = light_state ? 255 : 0; //sets target brightness (0-255)
         int fade_time = 3000;  //in ms
 
-        ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, target_duty, fade_time);
+        ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, light_pwm, fade_time);
         ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT); //no wait mode
         
-        printf(" ACTION: led grow lights turned %s (PWM duty: %lu/255)\n", light_state ? "ON" : "OFF", target_duty);
-        last_light_state = light_state;
+        printf("led grow lights adjusted to PWM: %lu/255\n", light_pwm);
+        last_light_pwm = light_pwm;
     }
 
 }

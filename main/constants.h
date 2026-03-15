@@ -1,6 +1,10 @@
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
 
+//measurement calibration ratios
+#define PWM_LUX_RATIO 0.0256f //PWM lux ratio (to be updated)
+
+
 
 //dev board definitions
 //#define PUMP_PIN 7
