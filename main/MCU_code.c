@@ -49,7 +49,7 @@ void wifi_init(void);
 void rtos_tasks_init(ThresholdData *thresh_data);
 void publish_all_sensors(SensorData *data);
 void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm, ThresholdData *thresh, bool new_data);
-void update_hardware_actuators(bool pump_state, uint32_t light_pwm);
+void update_hardware_actuators(bool pump_state, uint32_t light_pwm, bool new_data);
 bool read_water_level_sensor(void);
 void pull_adafruit_thresholds(ThresholdData *thresh);
 int get_target_lux(int level);
@@ -104,7 +104,7 @@ void app_main(void) {
 
         process_sensor_data(&current_sensor_data, &is_pump_active, &current_light_pwm, &local_thresholds, new_data_arrived); //logic processing
 
-        update_hardware_actuators(is_pump_active, current_light_pwm); //adjusts outputs
+        update_hardware_actuators(is_pump_active, current_light_pwm, new_data_arrived); //adjusts outputs
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -160,9 +160,9 @@ void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm
     }
 }
 
-void update_hardware_actuators(bool pump_state, uint32_t light_pwm) {  
+void update_hardware_actuators(bool pump_state, uint32_t light_pwm, bool new_data) {  
     static bool last_pump_state = false;//trigger only when changing them
-    static bool last_light_pwm = 300; //adding illegal value to cover startup edge cases
+    static uint32_t last_light_pwm = 300; //illegal value to cover startup edge cases
     
     if (pump_state != last_pump_state) {
         gpio_set_level(PUMP_PIN, pump_state ? 1 : 0);
@@ -175,18 +175,21 @@ void update_hardware_actuators(bool pump_state, uint32_t light_pwm) {
     //    printf(" ACTION: led grow lights turned %s\n", light_state ? "ON" : "OFF");
     //    last_light_state = light_state;
     //}
-
-    if (light_pwm != last_light_pwm) {
-        //uint32_t target_duty = light_state ? 255 : 0; //sets target brightness (0-255)
-        int fade_time = 3000;  //in ms
-
-        ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, light_pwm, fade_time);
-        ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT); //no wait mode
-        
-        printf("led grow lights adjusted to PWM: %lu/255\n", light_pwm);
-        last_light_pwm = light_pwm;
+    if(new_data) {
+        if (light_pwm != last_light_pwm) {
+            if (light_pwm == 0) {
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0); 
+                //gpio_set_level(LIGHT_PIN, 0);
+            } else {
+            //uint32_t target_duty = light_state ? 255 : 0; //sets target brightness (0-255)
+            int fade_time = 3000;  //in ms
+            ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, light_pwm, fade_time);
+            ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT); //no wait mode
+            }
+            printf("led grow lights adjusted to PWM: %lu/255\n", light_pwm);
+            last_light_pwm = light_pwm;
+        }
     }
-
 }
 
 void hardware_init(void) { //GPIO initializations 
@@ -456,7 +459,7 @@ ThresholdData get_safe_thresholds(ThresholdData *shared_thresh) {
 
 void adafruit_rx_task(void *pvParameters) {
     ThresholdData *shared_thresh = (ThresholdData *)pvParameters;
-    ThresholdData local_thresh;
+    ThresholdData local_thresh = {0};
 
     vTaskDelay(pdMS_TO_TICKS(5000)); //delay for startup
 
