@@ -23,6 +23,8 @@
 #define CAN_RX_PIN GPIO_NUM_18
 
 SemaphoreHandle_t threshold_mutex;
+SemaphoreHandle_t sensor_data_mutex;
+SemaphoreHandle_t tx_trigger_sem;
 
 static const char *TAG = "PLANT_SYSTEM";
 
@@ -46,7 +48,7 @@ void hardware_init(void); //declaring functions
 void can_driver_init(void);
 bool can_driver_read_sensor(SensorData *out_data);
 void wifi_init(void);
-void rtos_tasks_init(ThresholdData *thresh_data);
+void rtos_tasks_init(ThresholdData *thresh_data, SensorData *sensor_data);
 void publish_all_sensors(SensorData *data);
 void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm, ThresholdData *thresh, bool new_data);
 void update_hardware_actuators(bool pump_state, uint32_t light_pwm, bool new_data);
@@ -54,6 +56,7 @@ bool read_water_level_sensor(void);
 void pull_adafruit_thresholds(ThresholdData *thresh);
 int get_target_lux(int level);
 void adafruit_rx_task(void *pvParameters);
+void adafruit_tx_task(void *pvParameters);
 ThresholdData get_safe_thresholds(ThresholdData *shared_thresh);
 
 void app_main(void) {
@@ -71,24 +74,32 @@ void app_main(void) {
     };
     bool is_pump_active = false;
     uint32_t current_light_pwm = 0;
-    int64_t last_adafruit_post = 0;
+    //int64_t last_adafruit_post = 0;
     
     printf("system initialized, now listening for CANBUS messages\n");
 
-    rtos_tasks_init(&current_thresholds);
+    rtos_tasks_init(&current_thresholds, &current_sensor_data);
 
     while (1) {
         int64_t current_time = esp_timer_get_time();
-
         bool new_data_arrived = false;
 
         //pull_adafruit_thresholds(&current_thresholds);
 
         ThresholdData local_thresholds = get_safe_thresholds(&current_thresholds);
+        SensorData temp_sensor_data = current_sensor_data;
 
-        if (can_driver_read_sensor(&current_sensor_data)) {  //read sensor (non blocking)
+        if (can_driver_read_sensor(&temp_sensor_data)) {  //read sensor (non blocking)
             new_data_arrived = true;
             current_sensor_data.water_level = read_water_level_sensor(); //reads water level
+            
+            if (xSemaphoreTake(sensor_data_mutex, portMAX_DELAY)) {
+                current_sensor_data = temp_sensor_data;
+                xSemaphoreGive(sensor_data_mutex);
+            }
+            
+            xSemaphoreGive(tx_trigger_sem);  //trigger data upload
+
             printf("new message - temp: %.1f C, light: %u lux, hum: %u%%, moist: %u, water: %s\n", 
                 current_sensor_data.temperature, 
                 current_sensor_data.light_level,
@@ -96,13 +107,13 @@ void app_main(void) {
                 current_sensor_data.moisture,
                 current_sensor_data.water_level ? "HIGH" : "LOW");
 
-            if (current_time - last_adafruit_post >= ADA_TIME_LIMIT) {  //adafruit limiter
-                publish_all_sensors(&current_sensor_data);
-                last_adafruit_post = current_time;
-            }
+            //if (current_time - last_adafruit_post >= ADA_TIME_LIMIT) {  //adafruit limiter
+            //    publish_all_sensors(&current_sensor_data);
+            //    last_adafruit_post = current_time;
+            //}
         }
 
-        process_sensor_data(&current_sensor_data, &is_pump_active, &current_light_pwm, &local_thresholds, new_data_arrived); //logic processing
+        process_sensor_data(&temp_sensor_data, &is_pump_active, &current_light_pwm, &local_thresholds, new_data_arrived); //logic processing
 
         update_hardware_actuators(is_pump_active, current_light_pwm, new_data_arrived); //adjusts outputs
 
@@ -175,7 +186,7 @@ void update_hardware_actuators(bool pump_state, uint32_t light_pwm, bool new_dat
     //    printf(" ACTION: led grow lights turned %s\n", light_state ? "ON" : "OFF");
     //    last_light_state = light_state;
     //}
-    if(new_data) {
+    //if(new_data) {
         if (light_pwm != last_light_pwm) {
             if (light_pwm == 0) {
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0); 
@@ -189,7 +200,7 @@ void update_hardware_actuators(bool pump_state, uint32_t light_pwm, bool new_dat
             printf("led grow lights adjusted to PWM: %lu/255\n", light_pwm);
             last_light_pwm = light_pwm;
         }
-    }
+    //}
 }
 
 void hardware_init(void) { //GPIO initializations 
@@ -435,11 +446,13 @@ int get_target_lux(int level) {
     return 0; //turns light off if illegal value
 }
 
-void rtos_tasks_init(ThresholdData *thresh_data) {
+void rtos_tasks_init(ThresholdData *thresh_data, SensorData *sensor_data) {
     threshold_mutex = xSemaphoreCreateMutex(); //creates mutex
-    
-    if (threshold_mutex != NULL) { //checks, then launches tasks
+    sensor_data_mutex = xSemaphoreCreateMutex();
+    tx_trigger_sem = xSemaphoreCreateBinary();
+    if (threshold_mutex != NULL && sensor_data_mutex != NULL && tx_trigger_sem != NULL) { //checks, then launches tasks
         xTaskCreate(adafruit_rx_task, "adafruit_rx", 8192, thresh_data, 2, NULL);
+        xTaskCreate(adafruit_tx_task, "adafruit_tx", 8192, sensor_data, 2, NULL);
         //printf("RTOS tasks and mutexes initialized successfully\n");
     } else {
         printf("erorr: failed to create RTOS mutexes\n");
@@ -477,5 +490,24 @@ void adafruit_rx_task(void *pvParameters) {
         }
 
         vTaskDelay(pdMS_TO_TICKS(20000)); //20 second wait
+    }
+}
+
+void adafruit_tx_task(void *pvParameters) {
+    SensorData *shared_data = (SensorData *)pvParameters;
+    SensorData local_data = {0};
+
+    vTaskDelay(pdMS_TO_TICKS(3000)); //3 second wifi delay after boot
+
+    while (1) {
+        if (xSemaphoreTake(tx_trigger_sem, portMAX_DELAY)) {  //grab latest data
+            
+            if (xSemaphoreTake(sensor_data_mutex, portMAX_DELAY)) {
+                local_data = *shared_data;
+                xSemaphoreGive(sensor_data_mutex);
+            }
+            publish_all_sensors(&local_data);
+            vTaskDelay(pdMS_TO_TICKS(ADA_TIME_LIMIT / 1000)); 
+        }
     }
 }

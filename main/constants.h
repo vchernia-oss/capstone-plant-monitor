@@ -18,7 +18,7 @@
 //mcu board definitions
 #define PUMP_PIN 15
 #define LIGHT_PIN 16    
-#define ADA_TIME_LIMIT 10000000ULL  //30 seconds
+#define ADA_TIME_LIMIT 10000000ULL  //10 seconds
 #define WATER_LEVEL_PIN 21
 
 

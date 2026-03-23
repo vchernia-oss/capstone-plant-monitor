@@ -1,3 +1,3 @@
 idf_component_register(SRCS "MCU_code.c"
                     INCLUDE_DIRS "."
-                    REQUIRES esp_http_client nvs_flash driver esp_timer esp_wifi esp_event esp_netif mbedtls)
+                    REQUIRES esp_http_client nvs_flash driver esp_timer esp_wifi esp_event esp_netif mbedtls esp_crt_bundle)
