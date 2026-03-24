@@ -20,7 +20,7 @@
 #define LIGHT_PIN 16    
 #define ADA_TIME_LIMIT 10000000ULL  //10 seconds
 #define WATER_LEVEL_PIN 21
-
+//#define WATER_LEVEL_PIN 4
 
 //testing definitions
 #define PUMP_COOLDOWN 15000000ULL //15 second cooldown

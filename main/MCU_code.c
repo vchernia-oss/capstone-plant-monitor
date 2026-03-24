@@ -82,8 +82,9 @@ void app_main(void) {
 
     while (1) {
         int64_t current_time = esp_timer_get_time();
-        bool new_data_arrived = false;
+        bool new_data_arrived;
 
+        new_data_arrived = false;
         //pull_adafruit_thresholds(&current_thresholds);
 
         ThresholdData local_thresholds = get_safe_thresholds(&current_thresholds);
@@ -91,8 +92,9 @@ void app_main(void) {
 
         if (can_driver_read_sensor(&temp_sensor_data)) {  //read sensor (non blocking)
             new_data_arrived = true;
-            current_sensor_data.water_level = read_water_level_sensor(); //reads water level
-            
+            //current_sensor_data.water_level = read_water_level_sensor(); //reads water level
+            temp_sensor_data.water_level = read_water_level_sensor();
+
             if (xSemaphoreTake(sensor_data_mutex, portMAX_DELAY)) {
                 current_sensor_data = temp_sensor_data;
                 xSemaphoreGive(sensor_data_mutex);
