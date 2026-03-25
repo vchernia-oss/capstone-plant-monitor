@@ -91,6 +91,14 @@ void app_main(void) {
         SensorData temp_sensor_data = current_sensor_data;
 
         if (can_driver_read_sensor(&temp_sensor_data)) {  //read sensor (non blocking)
+
+            
+            //-- This part limits inputs to only once per 10 seconds
+            static int64_t last_read_time = 0;
+            if (esp_timer_get_time() - last_read_time >= 10000000ULL) {
+                last_read_time = esp_timer_get_time();
+            //--
+            
             new_data_arrived = true;
             //current_sensor_data.water_level = read_water_level_sensor(); //reads water level
             temp_sensor_data.water_level = read_water_level_sensor();
@@ -114,6 +122,7 @@ void app_main(void) {
             //    last_adafruit_post = current_time;
             //}
         }
+    }
 
         process_sensor_data(&temp_sensor_data, &is_pump_active, &current_light_pwm, &local_thresholds, new_data_arrived); //logic processing
 
