@@ -227,11 +227,28 @@ void update_hardware_actuators(bool pump_state, uint32_t light_pwm, bool new_dat
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0); 
                 //gpio_set_level(LIGHT_PIN, 0);
             } else {
-            //uint32_t target_duty = light_state ? 255 : 0; //sets target brightness (0-255)
-            int fade_time = 3000;  //in ms
-            ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, light_pwm, fade_time);
-            ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT); //no wait mode
+                int safe_last_pwm = (last_light_pwm == 300) ? 0 : last_light_pwm; //size of jump
+                int pwm_diff = abs((int)light_pwm - safe_last_pwm);
+                
+                int fade_time = (pwm_diff * 3000) / 255; //scale the time of the jump
+
+                if (fade_time < 50) { //if jump too small, set instantly
+                    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, light_pwm);
+                    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+                } else {
+                    ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, light_pwm, fade_time);
+                    ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT); 
+                }
             }
+
+            //else {
+            //uint32_t target_duty = light_state ? 255 : 0; //sets target brightness (0-255)
+            //int fade_time = 3000;  //in ms
+            //ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, light_pwm, fade_time);
+            //ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT); //no wait mode
+            //}
+
+
             printf("led grow lights adjusted to PWM: %lu/255\n", light_pwm);
             last_light_pwm = light_pwm;
         }
