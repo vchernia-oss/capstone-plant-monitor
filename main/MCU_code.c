@@ -18,6 +18,9 @@
 #include "freertos/semphr.h"
 #include "constants.h"
 #include "secrets.h"
+#include <time.h>
+#include <sys/time.h>
+#include "esp_sntp.h"
 
 #define CAN_TX_PIN GPIO_NUM_17
 #define CAN_RX_PIN GPIO_NUM_18
@@ -42,6 +45,7 @@ typedef struct {
     int moisture;
     int temperature;
     int on_off_toggle;
+    float light_hours;
 } ThresholdData;
 
 void hardware_init(void); //declaring functions
@@ -58,11 +62,13 @@ int get_target_lux(int level);
 void adafruit_rx_task(void *pvParameters);
 void adafruit_tx_task(void *pvParameters);
 ThresholdData get_safe_thresholds(ThresholdData *shared_thresh);
+void time_sync_init(void);
 
 void app_main(void) {
     can_driver_init(); 
     hardware_init(); 
     wifi_init(); 
+    time_sync_init();
 
     SensorData current_sensor_data = {0};
     
@@ -70,8 +76,10 @@ void app_main(void) {
         .light_intensity = 1,
         .moisture = 100,
         .temperature = 25,
-        .on_off_toggle = 1 // 1 = system on, 0 = system off
+        .on_off_toggle = 1, // 1 = system on, 0 = system off
+        .light_hours = 12.0
     };
+
     bool is_pump_active = false;
     uint32_t current_light_pwm = 0;
     //int64_t last_adafruit_post = 0;
@@ -92,7 +100,7 @@ void app_main(void) {
 
         if (can_driver_read_sensor(&temp_sensor_data)) {  //read sensor (non blocking)
 
-            
+
             //-- This part limits inputs to only once per 10 seconds
             static int64_t last_read_time = 0;
             if (esp_timer_get_time() - last_read_time >= 10000000ULL) {
@@ -121,8 +129,8 @@ void app_main(void) {
             //    publish_all_sensors(&current_sensor_data);
             //    last_adafruit_post = current_time;
             //}
+            }
         }
-    }
 
         process_sensor_data(&temp_sensor_data, &is_pump_active, &current_light_pwm, &local_thresholds, new_data_arrived); //logic processing
 
@@ -131,6 +139,7 @@ void app_main(void) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
 
 void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm, ThresholdData *thresh, bool new_data) { 
     static int64_t pump_start_time = 0;
@@ -148,16 +157,31 @@ void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm
     int64_t current_time = esp_timer_get_time();
 
     if (new_data == true) {
-        int target_lux = get_target_lux(thresh->light_intensity);
-        int error = target_lux - data->light_level;
-        int pwm_jump = error * PWM_LUX_RATIO;
-        
-        int new_pwm = (int)*light_pwm + pwm_jump;
+        time_t now;
+        struct tm timeinfo;
+        time(&now);
+        localtime_r(&now, &timeinfo);
 
-        if (new_pwm > 255) new_pwm = 255;  //restrict to valid PWM mode (0-255)
-        if (new_pwm < 0) new_pwm = 0;
+        float current_hour_float = timeinfo.tm_hour + (timeinfo.tm_min / 60.0f);
+        float start_hour = 8.0f; // 8:00am start time
+        float end_hour = start_hour + thresh->light_hours;
 
-        *light_pwm = (uint32_t)new_pwm;
+        //ensure time has synced through Wi-Fi (year > 1970) and time is within window
+        if (timeinfo.tm_year > (2024 - 1900) && current_hour_float >= start_hour && current_hour_float < end_hour) {
+            
+            int target_lux = get_target_lux(thresh->light_intensity);  //daytime logic
+            int error = target_lux - data->light_level;
+            int pwm_jump = error * PWM_LUX_RATIO;
+            
+            int new_pwm = (int)*light_pwm + pwm_jump;
+
+            if (new_pwm > 255) new_pwm = 255;  
+            if (new_pwm < 0) new_pwm = 0;
+
+            *light_pwm = (uint32_t)new_pwm;
+        } else {
+            *light_pwm = 0; //nighttime
+        }
     }
 
     if (*pump_state == false && is_cooldown == false && new_data == true) { //pump
@@ -434,8 +458,13 @@ void pull_adafruit_thresholds(ThresholdData *thresh) {
                 }
             }
 
-            printf(" downloaded thresholds light: %d moist: %d temp: %d toggle: %d\n", 
-                   thresh->light_intensity, thresh->moisture, thresh->temperature, thresh->on_off_toggle);
+            ptr = strstr(buffer, "\"light-hours\"");
+            if (ptr && (ptr = strstr(ptr, "\"last_value\":\""))) {
+                thresh->light_hours = atof(ptr + 14);
+            }
+
+            printf(" downloaded thresholds light: %d moist: %d temp: %d toggle: %d light hours: %.1f\n", 
+                   thresh->light_intensity, thresh->moisture, thresh->temperature, thresh->on_off_toggle, thresh->light_hours);
         }
 
         free(buffer);
@@ -521,4 +550,14 @@ void adafruit_tx_task(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(ADA_TIME_LIMIT / 1000)); 
         }
     }
+}
+
+void time_sync_init(void) {  //compares time against plant thresholds
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    
+    setenv("TZ", "MST7MDT,M3.2.0,M11.1.0", 1);  //sets time zone to mountain time
+    tzset();
+    //printf("mountain time zone set\n");
 }

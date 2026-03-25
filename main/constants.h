@@ -8,9 +8,9 @@
 //#define LUX_TARGET_MEDIUM 5000
 //#define LUX_TARGET_HIGH 15000
 
-#define LUX_TARGET_LOW 10
-#define LUX_TARGET_MEDIUM 11
-#define LUX_TARGET_HIGH 12
+#define LUX_TARGET_LOW 500
+#define LUX_TARGET_MEDIUM 1000
+#define LUX_TARGET_HIGH 3000
 
 //dev board definitions
 //#define PUMP_PIN 7
