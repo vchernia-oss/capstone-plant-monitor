@@ -29,6 +29,7 @@ SemaphoreHandle_t threshold_mutex;
 SemaphoreHandle_t sensor_data_mutex;
 SemaphoreHandle_t tx_trigger_sem;
 
+bool trigger_water_reset = false; 
 static const char *TAG = "PLANT_SYSTEM";
 
 typedef struct {  
@@ -46,6 +47,7 @@ typedef struct {
     int temperature;
     int on_off_toggle;
     float light_hours;
+    int water_now;
 } ThresholdData;
 
 void hardware_init(void); //declaring functions
@@ -63,6 +65,7 @@ void adafruit_rx_task(void *pvParameters);
 void adafruit_tx_task(void *pvParameters);
 ThresholdData get_safe_thresholds(ThresholdData *shared_thresh);
 void time_sync_init(void);
+void reset_water_now_feed(void);
 
 void app_main(void) {
     can_driver_init(); 
@@ -77,7 +80,8 @@ void app_main(void) {
         .moisture = 100,
         .temperature = 25,
         .on_off_toggle = 1, // 1 = system on, 0 = system off
-        .light_hours = 12.0
+        .light_hours = 12.0,
+        .water_now = 0
     };
 
     bool is_pump_active = false;
@@ -119,11 +123,11 @@ void app_main(void) {
             xSemaphoreGive(tx_trigger_sem);  //trigger data upload
 
             printf("new message - temp: %.1f C, light: %u lux, hum: %u%%, moist: %u, water: %s\n", 
-                current_sensor_data.temperature, 
-                current_sensor_data.light_level,
-                current_sensor_data.humidity,
-                current_sensor_data.moisture,
-                current_sensor_data.water_level ? "HIGH" : "LOW");
+                temp_sensor_data.temperature, 
+                temp_sensor_data.light_level,
+                temp_sensor_data.humidity,
+                temp_sensor_data.moisture,
+                temp_sensor_data.water_level ? "HIGH" : "LOW");
 
             //if (current_time - last_adafruit_post >= ADA_TIME_LIMIT) {  //adafruit limiter
             //    publish_all_sensors(&current_sensor_data);
@@ -139,7 +143,6 @@ void app_main(void) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
-
 
 void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm, ThresholdData *thresh, bool new_data) { 
     static int64_t pump_start_time = 0;
@@ -184,7 +187,15 @@ void process_sensor_data(SensorData *data, bool *pump_state, uint32_t *light_pwm
         }
     }
 
-    if (*pump_state == false && is_cooldown == false && new_data == true) { //pump
+    if (thresh->water_now == 1) {  //manual override
+        if (data->water_level == true) {
+            *pump_state = true;
+            pump_start_time = current_time;
+        }
+        thresh->water_now = 0;  //reset
+        trigger_water_reset = true;  //reset
+    } 
+    else if (*pump_state == false && is_cooldown == false && new_data == true) { //standard operation
         if ((data->moisture < thresh->moisture) && (data->water_level == true)) {
             *pump_state = true;
             pump_start_time = current_time;
@@ -480,8 +491,13 @@ void pull_adafruit_thresholds(ThresholdData *thresh) {
                 thresh->light_hours = atof(ptr + 14);
             }
 
-            printf(" downloaded thresholds light: %d moist: %d temp: %d toggle: %d light hours: %.1f\n", 
-                   thresh->light_intensity, thresh->moisture, thresh->temperature, thresh->on_off_toggle, thresh->light_hours);
+            ptr = strstr(buffer, "\"water-now\"");
+            if (ptr && (ptr = strstr(ptr, "\"last_value\":\""))) {
+                thresh->water_now = atoi(ptr + 14);
+            }
+
+            printf(" downloaded thresholds light: %d moist: %d temp: %d toggle: %d light hours: %.1f water now: %d\n", 
+                   thresh->light_intensity, thresh->moisture, thresh->temperature, thresh->on_off_toggle, thresh->light_hours, thresh->water_now);
         }
 
         free(buffer);
@@ -563,7 +579,14 @@ void adafruit_tx_task(void *pvParameters) {
                 local_data = *shared_data;
                 xSemaphoreGive(sensor_data_mutex);
             }
+
             publish_all_sensors(&local_data);
+
+            if (trigger_water_reset) {
+                trigger_water_reset = false;
+                reset_water_now_feed();
+            }
+
             vTaskDelay(pdMS_TO_TICKS(ADA_TIME_LIMIT / 1000)); 
         }
     }
@@ -577,4 +600,31 @@ void time_sync_init(void) {  //compares time against plant thresholds
     setenv("TZ", "MST7MDT,M3.2.0,M11.1.0", 1);  //sets time zone to mountain time
     tzset();
     //printf("mountain time zone set\n");
+}
+
+void reset_water_now_feed(void) {
+    char url[256];
+    snprintf(url, sizeof(url), "https://io.adafruit.com/api/v2/%s/feeds/%s.water-now/data", AIO_USERNAME, GROUP_THRESHOLDS);
+    char post_data[64] = "{\"value\": \"0\"}";
+    
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .crt_bundle_attach = esp_crt_bundle_attach, 
+    };
+    
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "X-AIO-Key", AIO_KEY);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        printf(" SUCCESSFULLY reset Adafruit water-now button to 0\n");
+    } else {
+        printf(" FAILED to reset Adafruit water-now button\n");
+    }
+    
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
 }
