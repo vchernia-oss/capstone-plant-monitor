@@ -12,6 +12,14 @@
 #define LUX_TARGET_MEDIUM 1000
 #define LUX_TARGET_HIGH 3000
 
+
+#define SENSOR_NODE_VREF 3.3f  //operating voltage
+#define SENSOR_NODE_ADC_MAX 4095.0f   // ADC max value (4095 for 12-bit, 1023 for 10-bit)
+#define PULL_DOWN_RESISTOR 10000.0f
+
+#define LDR_R10 115000.0f //calculated values
+#define LDR_GAMMA 1.21f
+
 //dev board definitions
 //#define PUMP_PIN 7
 //#define LIGHT_PIN 9

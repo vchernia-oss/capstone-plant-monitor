@@ -21,6 +21,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include "esp_sntp.h"
+#include <math.h>
 
 #define CAN_TX_PIN GPIO_NUM_17
 #define CAN_RX_PIN GPIO_NUM_18
@@ -29,12 +30,12 @@ SemaphoreHandle_t threshold_mutex;
 SemaphoreHandle_t sensor_data_mutex;
 SemaphoreHandle_t tx_trigger_sem;
 
-bool trigger_water_reset = false; 
+volatile bool trigger_water_reset = false; 
 static const char *TAG = "PLANT_SYSTEM";
 
 typedef struct {  
     float temperature;
-    uint16_t light_level;
+    uint32_t light_level;
     uint16_t humidity;
     uint16_t moisture;
     bool water_level;
@@ -66,6 +67,7 @@ void adafruit_tx_task(void *pvParameters);
 ThresholdData get_safe_thresholds(ThresholdData *shared_thresh);
 void time_sync_init(void);
 void reset_water_now_feed(void);
+uint32_t calculate_lux_from_adc(uint16_t raw_adc);
 
 void app_main(void) {
     can_driver_init(); 
@@ -122,9 +124,9 @@ void app_main(void) {
             
             xSemaphoreGive(tx_trigger_sem);  //trigger data upload
 
-            printf("new message - temp: %.1f C, light: %u lux, hum: %u%%, moist: %u, water: %s\n", 
+            printf("new message - temp: %.1f C, light: %l lux, hum: %u%%, moist: %u, water: %s\n", 
                 temp_sensor_data.temperature, 
-                temp_sensor_data.light_level,
+                (unsigned long)temp_sensor_data.light_level,
                 temp_sensor_data.humidity,
                 temp_sensor_data.moisture,
                 temp_sensor_data.water_level ? "HIGH" : "LOW");
@@ -137,6 +139,13 @@ void app_main(void) {
         }
 
         process_sensor_data(&temp_sensor_data, &is_pump_active, &current_light_pwm, &local_thresholds, new_data_arrived); //logic processing
+
+        if (local_thresholds.water_now == 0) {
+            if (xSemaphoreTake(threshold_mutex, portMAX_DELAY)) {
+                current_thresholds.water_now = 0;
+                xSemaphoreGive(threshold_mutex);
+            }
+        }
 
         update_hardware_actuators(is_pump_active, current_light_pwm, new_data_arrived); //adjusts outputs
 
@@ -324,7 +333,10 @@ bool can_driver_read_sensor(SensorData *out_data) {
             
             int16_t raw_temp = (rx_msg.data[0] << 8) | rx_msg.data[1];
             out_data->temperature = raw_temp / 10.0f;
-            out_data->light_level = (rx_msg.data[2] << 8) | rx_msg.data[3];
+
+            uint16_t raw_light_adc = (rx_msg.data[2] << 8) | rx_msg.data[3];
+            out_data->light_level = calculate_lux_from_adc(raw_light_adc);
+
             out_data->humidity = (rx_msg.data[4] << 8) | rx_msg.data[5];
             out_data->moisture = (rx_msg.data[6] << 8) | rx_msg.data[7];
             out_data->raw_id = rx_msg.identifier;
@@ -387,13 +399,13 @@ void publish_all_sensors(SensorData *data) {
     snprintf(post_data, sizeof(post_data), 
         "{\"feeds\": ["
             "{\"key\": \"%s\", \"value\": \"%.2f\"}, "
-            "{\"key\": \"%s\", \"value\": \"%u\"}, "
+            "{\"key\": \"%s\", \"value\": \"%lu\"}, "
             "{\"key\": \"%s\", \"value\": \"%u\"}, "
             "{\"key\": \"%s\", \"value\": \"%u\"}, "
             "{\"key\": \"%s\", \"value\": \"%d\"}"
         "]}", 
         FEED_TEMPERATURE, data->temperature,
-        FEED_LIGHT, data->light_level,
+        FEED_LIGHT, (unsigned long)data->light_level,
         FEED_HUMIDITY, data->humidity,
         FEED_MOISTURE, data->moisture,
         FEED_WATER_LEVEL, data->water_level ? 1 : 0
@@ -451,14 +463,14 @@ void pull_adafruit_thresholds(ThresholdData *thresh) {
         esp_http_client_fetch_headers(client);
         
         //char buffer[2048] = {0}; 
-        char *buffer = calloc(1, 2048); 
+        char *buffer = calloc(1, 4096); 
         if (buffer == NULL) {
             printf(" failed to allocate memory for buffer\n");
             esp_http_client_cleanup(client);
             return;
         }
 
-        int read_len = esp_http_client_read(client, buffer, 2048 - 1);
+        int read_len = esp_http_client_read(client, buffer, 4096 - 1);
         
         if (read_len > 0) {
             char *ptr = strstr(buffer, "\"light-intensity\"");
@@ -627,4 +639,13 @@ void reset_water_now_feed(void) {
     
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+}
+
+uint32_t calculate_lux_from_adc(uint16_t raw_adc) {
+    float lux_float = 43.15084f * expf(0.002261f * (float)raw_adc);
+
+    if (lux_float > 4294967295.0f) {
+        return 4294967295;
+    }
+    return (uint32_t)lux_float;
 }
