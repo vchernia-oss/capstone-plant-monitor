@@ -642,10 +642,9 @@ void reset_water_now_feed(void) {
 }
 
 uint32_t calculate_lux_from_adc(uint16_t raw_adc) {
-    float lux_float = 43.15084f * expf(0.002261f * (float)raw_adc);
-
-    if (lux_float > 4294967295.0f) {
-        return 4294967295;
+    float lux_float = (1.08859f * (float)raw_adc) - 0.64314f;
+    if (lux_float < 0.0f) {
+    return 0;
     }
     return (uint32_t)lux_float;
 }
